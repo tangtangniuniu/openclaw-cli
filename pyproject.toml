@@ -1,0 +1,28 @@
+[project]
+name = "openclaw-client"
+version = "0.1.0"
+description = "Python client and tests for OpenClaw Gateway."
+readme = "AGENTS.md"
+requires-python = ">=3.12"
+dependencies = [
+  "cryptography>=45.0.0",
+  "websockets>=15.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3.0",
+  "pytest-asyncio>=0.24.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = [
+  "e2e: tests that connect to a real OpenClaw Gateway service",
+]
+asyncio_mode = "auto"
