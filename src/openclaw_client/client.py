@@ -33,6 +33,7 @@ class OpenClawGatewayError(RuntimeError):
 class RequestResult:
     response: dict[str, Any]
     events: list[dict[str, Any]]
+    reply_text: str
 
 
 class OpenClawGatewayClient:
@@ -91,6 +92,7 @@ class OpenClawGatewayClient:
         session_key: str = "main",
         deliver: bool = True,
         response_timeout: float = 15.0,
+        settle_timeout: float = 1.0,
     ) -> RequestResult:
         ws = self._require_connection()
         request_id = self._next_request_id()
@@ -105,20 +107,76 @@ class OpenClawGatewayClient:
 
         events: list[dict[str, Any]] = []
         deadline = asyncio.get_running_loop().time() + response_timeout
+        response: dict[str, Any] | None = None
 
         while True:
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
+                if response is not None:
+                    reply_text = self.extract_reply_text(events)
+                    if not reply_text:
+                        reply_text = await self._poll_history_for_reply(
+                            session_key=session_key,
+                            message=message,
+                            accepted_at=self._extract_accepted_at(response),
+                            deadline=deadline,
+                        )
+                    return RequestResult(
+                        response=response,
+                        events=events,
+                        reply_text=reply_text,
+                    )
                 raise OpenClawGatewayError("Timed out waiting for agent response.")
 
-            frame = await self._recv_json(timeout=remaining)
+            recv_timeout = remaining
+            if response is not None:
+                recv_timeout = min(remaining, settle_timeout)
+
+            try:
+                frame = await self._recv_json(timeout=recv_timeout)
+            except asyncio.TimeoutError:
+                if response is not None:
+                    reply_text = self.extract_reply_text(events)
+                    if not reply_text:
+                        reply_text = await self._poll_history_for_reply(
+                            session_key=session_key,
+                            message=message,
+                            accepted_at=self._extract_accepted_at(response),
+                            deadline=deadline,
+                        )
+                    return RequestResult(
+                        response=response,
+                        events=events,
+                        reply_text=reply_text,
+                    )
+                raise OpenClawGatewayError("Timed out waiting for agent response.") from None
+
             frame_type = frame.get("type")
             if frame_type == "event":
                 events.append(frame)
+                if response is not None and self._is_terminal_agent_event(frame):
+                    reply_text = self.extract_reply_text(events)
+                    if not reply_text:
+                        reply_text = await self._poll_history_for_reply(
+                            session_key=session_key,
+                            message=message,
+                            accepted_at=self._extract_accepted_at(response),
+                            deadline=deadline,
+                        )
+                    return RequestResult(
+                        response=response,
+                        events=events,
+                        reply_text=reply_text,
+                    )
+                continue
+            if response is not None and frame_type == "res" and frame.get("id") != request_id:
                 continue
 
             self._ensure_response(frame, request_id, "agent")
-            return RequestResult(response=frame, events=events)
+            response = frame
+
+            if self.extract_reply_text([frame]):
+                return RequestResult(response=response, events=events, reply_text=self.extract_reply_text([frame]))
 
     async def disconnect(self) -> None:
         if self._ws is None:
@@ -229,3 +287,141 @@ class OpenClawGatewayClient:
     @staticmethod
     def _next_request_id() -> str:
         return f"req-{uuid.uuid4().hex}"
+
+    async def _request(self, method: str, params: dict[str, Any], *, timeout: float) -> dict[str, Any]:
+        ws = self._require_connection()
+        request_id = self._next_request_id()
+        await ws.send(self.build_request(request_id, method, params))
+
+        while True:
+            frame = await self._recv_json(timeout=timeout)
+            if frame.get("type") == "event":
+                continue
+            self._ensure_response(frame, request_id, method)
+            return frame
+
+    async def _poll_history_for_reply(
+        self,
+        *,
+        session_key: str,
+        message: str,
+        accepted_at: int | None,
+        deadline: float,
+        interval: float = 0.5,
+    ) -> str:
+        loop = asyncio.get_running_loop()
+
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return ""
+
+            history = await self._request("chat.history", {"sessionKey": session_key}, timeout=remaining)
+            reply = self._extract_reply_from_history(
+                history=history,
+                message=message,
+                accepted_at=accepted_at,
+            )
+            if reply:
+                return reply
+
+            await asyncio.sleep(min(interval, max(deadline - loop.time(), 0)))
+
+    @classmethod
+    def _extract_reply_from_history(
+        cls,
+        *,
+        history: dict[str, Any],
+        message: str,
+        accepted_at: int | None,
+    ) -> str:
+        payload = history.get("payload")
+        if not isinstance(payload, dict):
+            return ""
+
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            return ""
+
+        target_user_index: int | None = None
+        for index, item in enumerate(messages):
+            if not isinstance(item, dict):
+                continue
+            if item.get("role") != "user":
+                continue
+            if accepted_at is not None and cls._coerce_int(item.get("timestamp")) is not None:
+                if cls._coerce_int(item.get("timestamp")) < accepted_at - 2000:
+                    continue
+            if cls.extract_reply_text([{"payload": item.get("content")}]) == message:
+                target_user_index = index
+
+        search_start = 0 if target_user_index is None else target_user_index + 1
+        for item in messages[search_start:]:
+            if not isinstance(item, dict):
+                continue
+            if item.get("role") != "assistant":
+                continue
+            timestamp = cls._coerce_int(item.get("timestamp"))
+            if accepted_at is not None and timestamp is not None and timestamp < accepted_at:
+                continue
+            reply = cls.extract_reply_text([{"payload": item.get("content")}])
+            if reply:
+                return reply
+            error_message = item.get("errorMessage")
+            if isinstance(error_message, str) and error_message.strip():
+                return error_message
+        return ""
+
+    @staticmethod
+    def _extract_accepted_at(response: dict[str, Any]) -> int | None:
+        payload = response.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        return OpenClawGatewayClient._coerce_int(payload.get("acceptedAt"))
+
+    @staticmethod
+    def _coerce_int(value: Any) -> int | None:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        return None
+
+    @staticmethod
+    def _is_terminal_agent_event(frame: dict[str, Any]) -> bool:
+        event = str(frame.get("event", "")).lower()
+        payload = frame.get("payload")
+        if event.endswith((".done", ".completed", ".complete", ".finished", ".finish")):
+            return True
+        if isinstance(payload, dict):
+            if payload.get("done") is True or payload.get("completed") is True or payload.get("finished") is True:
+                return True
+        return False
+
+    @classmethod
+    def extract_reply_text(cls, frames: list[dict[str, Any]]) -> str:
+        fragments: list[str] = []
+        for frame in frames:
+            cls._collect_text_fragments(frame.get("payload"), fragments)
+        return "".join(fragments).strip()
+
+    @classmethod
+    def _collect_text_fragments(cls, value: Any, fragments: list[str]) -> None:
+        if value is None:
+            return
+        if isinstance(value, str):
+            if value.strip():
+                fragments.append(value)
+            return
+        if isinstance(value, list):
+            for item in value:
+                cls._collect_text_fragments(item, fragments)
+            return
+        if not isinstance(value, dict):
+            return
+
+        preferred_keys = ("text", "delta", "content", "message", "reply", "response", "output")
+        for key in preferred_keys:
+            nested = value.get(key)
+            if nested is not None:
+                cls._collect_text_fragments(nested, fragments)

@@ -1,4 +1,5 @@
 import json
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -79,6 +80,7 @@ async def test_send_message_collects_events_and_returns_response():
         [
             {"type": "event", "event": "agent.delta", "payload": {"text": "hello"}},
             {"type": "res", "id": "req-agent", "ok": True, "payload": {"accepted": True}},
+            {"type": "event", "event": "agent.completed", "payload": {"text": " world", "done": True}},
         ]
     )
     client = OpenClawGatewayClient()
@@ -89,8 +91,59 @@ async def test_send_message_collects_events_and_returns_response():
 
     assert result.response["payload"]["accepted"] is True
     assert result.events[0]["event"] == "agent.delta"
+    assert result.reply_text == "hello world"
     assert fake_ws.sent_messages[0]["method"] == "agent"
     assert fake_ws.sent_messages[0]["params"]["message"] == "hi"
+
+
+@pytest.mark.asyncio
+async def test_send_message_falls_back_to_chat_history():
+    fake_ws = FakeWebSocket(
+        [
+            {"type": "res", "id": "req-agent", "ok": True, "payload": {"accepted": True, "acceptedAt": 1000}},
+        ]
+    )
+    client = OpenClawGatewayClient()
+    client._ws = fake_ws
+
+    original_recv = fake_ws.recv
+
+    async def recv_with_wait():
+        if fake_ws._frames:
+            return await original_recv()
+        await asyncio.sleep(1)
+        raise AssertionError("unreachable")
+
+    fake_ws.recv = recv_with_wait  # type: ignore[method-assign]
+
+    request_ids = iter(["req-agent", "idem-1"])
+    client._next_request_id = lambda: next(request_ids)  # type: ignore[method-assign]
+
+    async def fake_poll_history_for_reply(**kwargs):
+        return "history reply"
+
+    client._poll_history_for_reply = fake_poll_history_for_reply  # type: ignore[method-assign]
+    result = await client.send_message("hi", session_key="main", settle_timeout=0.01)
+
+    assert result.response["payload"]["accepted"] is True
+    assert result.reply_text == "history reply"
+
+
+def test_extract_reply_text_reads_nested_content():
+    frames = [
+        {
+            "type": "event",
+            "event": "agent.completed",
+            "payload": {
+                "content": [
+                    {"type": "output_text", "text": "你好"},
+                    {"type": "output_text", "text": "，世界"},
+                ]
+            },
+        }
+    ]
+
+    assert OpenClawGatewayClient.extract_reply_text(frames) == "你好，世界"
 
 
 @pytest.mark.asyncio

@@ -23,6 +23,9 @@ async def _run(args: argparse.Namespace) -> int:
 
     print("connect: ok")
     print(json.dumps(result.response, ensure_ascii=False, indent=2))
+    if result.reply_text:
+        print("reply:")
+        print(result.reply_text)
     if result.events:
         print("events:")
         for event in result.events:

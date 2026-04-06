@@ -28,6 +28,8 @@ async def test_real_gateway_connect_send_disconnect():
         session_key=os.getenv("OPENCLAW_SESSION_KEY", "main"),
     )
     assert result.response["ok"] is True
+    print("reply:")
+    print(result.reply_text or "<empty>")
 
     await client.disconnect()
     assert client.is_connected is False
