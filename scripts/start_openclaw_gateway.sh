@@ -4,6 +4,8 @@ set -euo pipefail
 
 SERVICE_NAME="openclaw-gateway.service"
 
+export OPENCLAW_GATEWAY_PASSWORD="zxt2000"
+
 echo "启动 ${SERVICE_NAME} ..."
 systemctl --user start "${SERVICE_NAME}"
 
