@@ -1,0 +1,12 @@
+[
+  {
+    "type": "message",
+    "role": "system",
+    "content": "你是一个简洁的中文助理，只用一句话回答。"
+  },
+  {
+    "type": "message",
+    "role": "user",
+    "content": "OpenClaw 的 OpenResponses 接口和 /v1/chat/completions 有什么本质区别？"
+  }
+]
