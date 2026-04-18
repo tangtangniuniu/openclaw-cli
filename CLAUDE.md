@@ -138,11 +138,51 @@ Demo 对应的 HTTP bearer 则必须匹配 `~/.openclaw/openclaw.json` 中的
 ## 仓库布局速览
 
 ```
-src/openclaw_client/      WS 客户端（client.py + device_auth.py + cli.py）
+src/openclaw_client/      WS 客户端 + 会话池
+  ├── client.py             串行单请求 gateway client
+  ├── device_auth.py        Ed25519 设备身份 + 签名工具
+  ├── pool.py               多用户会话池：store + frame router + supervisor + scheduler
+  └── cli.py
 src/openclaw_gateway_chat_test.py  最小对话测试入口，作为 uv 脚本使用
-demo/                     四类 Gateway 接口的独立演示脚本
-doc/                      中文文档（Gateway 接口说明 + 密码/连接指南）
+chatbot/                  Web chatbot 前端（HTTP + WS 同端口）
+  ├── server.py             websockets.serve + process_request 桥接到 OpenClawSessionPool
+  ├── user_sessions.py      UserSessionsStore：每用户拥有的 session 列表（独立于 pool 绑定）
+  └── static/               index.html / app.css / app.js，FUI 扁平风格
+demo/                     四类 Gateway 接口 + 会话池的演示脚本
+doc/                      中文文档：gateway_interfaces.md、session_pool.md、chatbot_web.md、
+                          diagnostic_agent_video_prompts.md（mock 英文版 + 9 阶段视频 prompt）
 scripts/                  systemctl --user 的封装 + 联调脚本
 tests/unit/               单元测试，monkeypatch FakeWebSocket
 tests/e2e/                端到端测试，`-m e2e` 标记，连真实 Gateway
 ```
+
+## Chatbot Web 要点（`chatbot/`）
+
+- **单端口 HTTP + WS**：通过 `websockets.asyncio.serve(..., process_request=...)`，
+  `/` 与 `/static/*` 走 HTTP 返回 `Response`，`/ws` 返回 `None` 放行升级。
+- **存储分离**：`pool.SessionStore` 管「当前活跃绑定」，
+  `chatbot.UserSessionsStore` 管「用户拥有哪些 session」；切 session 只写前者，
+  增删 session 会同时清理两者。
+- **启动**：`python -m chatbot.server --gateway-token ... --port 5173`；默认
+  `~/.openclaw-cli/user-sessions.json` 与 pool 的 `session-map.json` 共存。
+- **没有流式**：pool.send 是 pending→done 两段式；要做真流式需在 pool 增加
+  事件回调并把 delta 通过 WS 推给前端。视觉风格参考
+  `doc/diagnostic_agent_video_prompts.md` 的静态 mock。
+
+## `OpenClawSessionPool` 要点（`pool.py`）
+
+- **场景**：chatbot 的 `(user, chat_session_id)` → gateway `sessionKey` 映
+  射；持久化到 `~/.openclaw-cli/session-map.json`，重启恢复。
+- **协议模型与 `client.py` 的关键差异**：`client.py` 的 `send_message` 独占
+  接收流、不支持并发；`pool.py` 引入 `FrameRouter` 作为真正的多路复用器，
+  按 `req id` 分发 `res`、按 `payload.sessionKey` 分发 `event`，支持多个请求
+  在一条 WS 上并发飞行。
+- **并发控制**：`FairScheduler(capacity=4)` 对齐 OpenClaw 主 agent 车道；单
+  用户单会话单请求假设下，`asyncio.Semaphore` 的 FIFO 即公平。
+- **自动重连**：`ConnectionSupervisor._supervise` 指数退避重连；在飞请求会
+  收到 `__router_closed__` 标记，`send()` 抛 `PoolError`，上层自行重试。
+- **复用边界**：握手复用 `device_auth.build_signed_device`，文本抽取复用
+  `OpenClawGatewayClient.extract_reply_text / _is_terminal_agent_event /
+  _extract_reply_from_history` 三个静态方法；`client.py` 不应被改动以支持池
+  化场景，一律走新模块。
+

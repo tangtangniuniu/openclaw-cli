@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpenClaw · Diagnostic Console</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <div class="console" aria-label="OpenClaw Diagnostic Console">
+    <!-- ======= TOP BAR ======= -->
+    <header class="top-bar">
+      <div class="brand">
+        <span class="logo-mark">◢◤</span>
+        <div class="brand-text">
+          <span class="brand-title">OPENCLAW · 自主诊断 Agent</span>
+          <span class="brand-sub">AGENT CONTROL CONSOLE · v0.1</span>
+        </div>
+      </div>
+      <div class="top-gauges">
+        <div class="gauge">
+          <span class="gauge-label">CONCURRENCY</span>
+          <span class="gauge-value" id="gauge-concurrency">0 / 4</span>
+        </div>
+        <div class="gauge">
+          <span class="gauge-label">LINK</span>
+          <span class="gauge-value" id="gauge-link">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="status-label">DISCONNECTED</span>
+          </span>
+        </div>
+      </div>
+    </header>
+
+    <!-- ======= MAIN GRID ======= -->
+    <div class="grid">
+
+      <!-- ======= LEFT: Sessions ======= -->
+      <aside class="panel panel-left" aria-label="Sessions panel">
+        <div class="panel-frame"></div>
+        <div class="panel-header">
+          <span class="panel-tag">L · SESSIONS</span>
+          <span class="panel-accent" aria-hidden="true"></span>
+        </div>
+
+        <section class="op-picker">
+          <label for="user-input">OPERATOR ID</label>
+          <div class="op-row">
+            <input id="user-input" type="text" autocomplete="off" value="alice" placeholder="e.g. alice" />
+            <button id="op-connect" class="btn btn-primary" type="button">CONNECT</button>
+          </div>
+          <p class="op-hint">chatbot 用户名 → 映射到 gateway sessionKey</p>
+          <div class="op-history" id="op-history-box" hidden>
+            <div class="op-history-head">
+              <span class="op-history-title">RECENT OPERATORS</span>
+              <button type="button" class="op-history-clear" id="op-history-clear">clear</button>
+            </div>
+            <ul class="op-history-list" id="op-history"></ul>
+          </div>
+        </section>
+
+        <section class="session-actions">
+          <div class="session-actions-title">
+            <span>SESSION LIST</span>
+            <span class="pill" id="session-count">0</span>
+          </div>
+          <button id="new-session" class="btn btn-ghost" type="button">
+            <span class="ico-plus">＋</span>
+            NEW DIAGNOSTIC SESSION
+          </button>
+        </section>
+
+        <ul id="sessions-list" class="sessions" aria-live="polite"></ul>
+
+        <footer class="panel-footer">
+          <span class="tick" aria-hidden="true"></span>
+          <span>persisted · ~/.openclaw-cli/</span>
+        </footer>
+      </aside>
+
+      <!-- ======= CENTER: Conversation ======= -->
+      <main class="panel panel-center" aria-label="Conversation">
+        <div class="panel-frame"></div>
+
+        <div class="thread-head">
+          <div class="thread-title">
+            <span class="thread-mark" aria-hidden="true">◉</span>
+            <h2 id="active-name">— 未选择会话 —</h2>
+          </div>
+          <div class="thread-meta">
+            <span class="chip chip-key" id="active-key" title="OpenClaw sessionKey">no session</span>
+          </div>
+        </div>
+
+        <!-- workflow strip: decorative + live step indicator -->
+        <div class="workflow" id="workflow" aria-hidden="true">
+          <div class="step step-input"><span>INPUT</span></div>
+          <div class="arrow"></div>
+          <div class="step step-plan"><span>PLAN</span></div>
+          <div class="arrow"></div>
+          <div class="loop">
+            <span class="loop-tag">LOOP ×N</span>
+            <div class="step step-sql">Text2SQL</div>
+            <div class="arrow small"></div>
+            <div class="step step-code">Text2Code</div>
+            <div class="arrow small"></div>
+            <div class="step step-api">Text2API</div>
+          </div>
+          <div class="arrow"></div>
+          <div class="step step-llm"><span>LLM REASON</span></div>
+          <div class="arrow"></div>
+          <div class="step step-out"><span>RESULT</span></div>
+        </div>
+
+        <div class="messages" id="messages" aria-live="polite"></div>
+
+        <form class="composer" id="composer" autocomplete="off">
+          <div class="composer-tools">
+            <button type="button" class="plus-btn" id="tools-btn" aria-label="tools">＋</button>
+            <div class="tools-menu" id="tools-menu" hidden>
+              <button type="button" data-prompt="【诊断】">
+                <span class="tool-ico ico-stetho" aria-hidden="true">🩺</span>
+                <span>诊断</span>
+              </button>
+              <button type="button" data-prompt="【运维】">
+                <span class="tool-ico ico-wrench" aria-hidden="true">🔧</span>
+                <span>运维</span>
+              </button>
+              <button type="button" data-prompt="【查询】">
+                <span class="tool-ico ico-search" aria-hidden="true">🔎</span>
+                <span>查询</span>
+              </button>
+              <button type="button" data-prompt="【告警】">
+                <span class="tool-ico ico-alert" aria-hidden="true">⚠</span>
+                <span>告警</span>
+              </button>
+              <button type="button" data-prompt="【SQL】">
+                <span class="tool-ico ico-db" aria-hidden="true">▦</span>
+                <span>SQL</span>
+              </button>
+              <button type="button" data-prompt="【代码】">
+                <span class="tool-ico ico-code" aria-hidden="true">{}</span>
+                <span>Code</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="composer-input" id="composer-input">
+            <textarea
+              id="message-input"
+              rows="1"
+              placeholder="诊断南山区西丽留仙洞 N105 网元丢包问题"
+            ></textarea>
+            <div class="suggest" id="suggest" hidden>
+              <div class="suggest-item suggest-active">
+                <span class="suggest-main">N105 — 5G 基站（西丽片区）</span>
+                <span class="suggest-sub">OpenClaw 已在历史中关联 · 置信度 92%</span>
+              </div>
+              <div class="suggest-item dim">N105-001 · 分布单元 DU#1</div>
+              <div class="suggest-item dim">N105-LINK · 光传送通道</div>
+            </div>
+          </div>
+
+          <button type="submit" id="send-btn" class="send-btn" aria-label="send">▶</button>
+        </form>
+      </main>
+
+      <!-- ======= RIGHT: Inspector ======= -->
+      <aside class="panel panel-right" aria-label="Inspector">
+        <div class="panel-frame"></div>
+        <div class="panel-header">
+          <span class="panel-tag">R · INSPECTOR</span>
+          <span class="panel-accent" aria-hidden="true"></span>
+        </div>
+
+        <section class="insp-card card-llm">
+          <header>
+            <span class="card-dot" style="--dot: var(--llm)"></span>
+            <span class="card-title">LLM · Chain of Thought</span>
+            <span class="card-state" id="llm-state">idle</span>
+          </header>
+          <ol class="bubbles" id="cot-list">
+            <li class="bubble dim">—</li>
+          </ol>
+        </section>
+
+        <section class="insp-card card-tools">
+          <header>
+            <span class="card-dot" style="--dot: var(--api)"></span>
+            <span class="card-title">TOOL · API / SQL / Code</span>
+            <span class="card-state" id="tool-state">—</span>
+          </header>
+          <ul class="tool-events" id="tool-events"></ul>
+        </section>
+
+        <section class="insp-card card-metrics">
+          <header>
+            <span class="card-dot" style="--dot: var(--code)"></span>
+            <span class="card-title">POOL METRICS</span>
+          </header>
+          <dl class="metrics">
+            <div><dt>ACTIVE SESSION</dt><dd id="metric-active">—</dd></div>
+            <div><dt>USER</dt><dd id="metric-user">—</dd></div>
+            <div><dt>SESSION KEY</dt><dd id="metric-key">—</dd></div>
+            <div><dt>LANES</dt><dd id="metric-lanes">0 / 4</dd></div>
+          </dl>
+        </section>
+      </aside>
+    </div>
+
+    <!-- corner brackets (decorative) -->
+    <div class="corner corner-tl" aria-hidden="true"></div>
+    <div class="corner corner-tr" aria-hidden="true"></div>
+    <div class="corner corner-bl" aria-hidden="true"></div>
+    <div class="corner corner-br" aria-hidden="true"></div>
+  </div>
+
+  <template id="tpl-message-user">
+    <li class="msg msg-user">
+      <div class="msg-role">OPERATOR</div>
+      <div class="msg-bubble"></div>
+    </li>
+  </template>
+
+  <template id="tpl-message-assistant">
+    <li class="msg msg-assistant">
+      <div class="msg-role">LLM · ASSISTANT</div>
+      <div class="msg-bubble"></div>
+    </li>
+  </template>
+
+  <template id="tpl-message-system">
+    <li class="msg msg-system">
+      <div class="msg-role">SYSTEM</div>
+      <div class="msg-bubble"></div>
+    </li>
+  </template>
+
+  <template id="tpl-session-item">
+    <li class="session-item">
+      <button class="session-main" type="button">
+        <span class="session-dot" aria-hidden="true"></span>
+        <span class="session-name"></span>
+        <span class="session-time"></span>
+      </button>
+      <button class="session-del" type="button" aria-label="delete session">✕</button>
+    </li>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
