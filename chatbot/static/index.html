@@ -88,6 +88,28 @@
             <h2 id="active-name">— 未选择会话 —</h2>
           </div>
           <div class="thread-meta">
+            <div class="toggles" role="group" aria-label="显示选项">
+              <button
+                type="button"
+                class="toggle-btn"
+                id="toggle-thinking"
+                aria-pressed="false"
+                title="显示 / 隐藏思考过程"
+              >
+                <span class="toggle-ico" aria-hidden="true">🧠</span>
+                <span class="toggle-label">THINK</span>
+              </button>
+              <button
+                type="button"
+                class="toggle-btn on"
+                id="toggle-tools"
+                aria-pressed="true"
+                title="显示 / 隐藏 tool call"
+              >
+                <span class="toggle-ico" aria-hidden="true">🔧</span>
+                <span class="toggle-label">TOOLS</span>
+              </button>
+            </div>
             <span class="chip chip-key" id="active-key" title="OpenClaw sessionKey">no session</span>
           </div>
         </div>
@@ -244,6 +266,46 @@
         <span class="session-time"></span>
       </button>
       <button class="session-del" type="button" aria-label="delete session">✕</button>
+    </li>
+  </template>
+
+  <template id="tpl-tool-card">
+    <li class="tool-card">
+      <button class="tool-head" type="button" aria-expanded="true">
+        <span class="tool-caret" aria-hidden="true">▾</span>
+        <span class="tool-bolt" aria-hidden="true">⚡</span>
+        <span class="tool-kind"></span>
+        <span class="tool-name"></span>
+        <span class="tool-preview"></span>
+      </button>
+      <div class="tool-body">
+        <div class="tool-section tool-input" hidden>
+          <button class="tool-section-head" type="button" aria-expanded="true">
+            <span class="caret" aria-hidden="true">▾</span>
+            <span class="tool-section-title">TOOL INPUT</span>
+          </button>
+          <pre class="tool-pre tool-input-pre"></pre>
+        </div>
+        <div class="tool-section tool-output" hidden>
+          <button class="tool-section-head" type="button" aria-expanded="true">
+            <span class="caret" aria-hidden="true">▾</span>
+            <span class="tool-section-title">TOOL OUTPUT</span>
+          </button>
+          <pre class="tool-pre tool-output-pre"></pre>
+        </div>
+      </div>
+    </li>
+  </template>
+
+  <template id="tpl-thinking-card">
+    <li class="think-card">
+      <button class="think-head" type="button" aria-expanded="false">
+        <span class="tool-caret" aria-hidden="true">▸</span>
+        <span class="tool-bolt think-ico" aria-hidden="true">🧠</span>
+        <span class="tool-kind">Thinking</span>
+        <span class="tool-preview"></span>
+      </button>
+      <pre class="tool-pre think-body" hidden></pre>
     </li>
   </template>
 

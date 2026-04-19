@@ -247,8 +247,14 @@ class ChatbotServer:
             self.sessions.touch(user, binding.chat_session_id)
             await self._reply_sessions(connection, user)
             await self._send(connection, {"op": "reply.pending"})
+
+            seen_keys: set[Any] = set()
+
+            async def on_event(frame: dict[str, Any]) -> None:
+                await self._forward_stream_event(connection, frame, seen_keys)
+
             try:
-                result = await self.pool.send(user, text)
+                result = await self.pool.send(user, text, on_event=on_event)
             except PoolError as exc:
                 await self._send(connection, {"op": "reply.error", "message": str(exc)})
                 return
@@ -330,6 +336,92 @@ class ChatbotServer:
         except ConnectionClosed:
             pass
 
+    async def _forward_stream_event(
+        self,
+        connection: ServerConnection,
+        frame: dict[str, Any],
+        seen_keys: set[Any],
+    ) -> None:
+        """Convert a raw gateway event into zero or more chatbot stream frames."""
+        ev = frame.get("event")
+        payload = frame.get("payload") or {}
+        if not isinstance(payload, dict):
+            return
+
+        # 真正的"每完成一步推送一条消息"的事件流：session.message
+        if ev == "session.message":
+            message = payload.get("message")
+            if not isinstance(message, dict):
+                return
+            oc = message.get("__openclaw") or {}
+            msg_id = oc.get("id") or f"{message.get('timestamp')}:{message.get('role')}"
+            if msg_id in seen_keys:
+                return
+            seen_keys.add(msg_id)
+            normalized_list = _normalize_messages([message])
+            if not normalized_list:
+                return
+            await self._send(
+                connection,
+                {
+                    "op": "stream.message",
+                    "message": normalized_list[0],
+                },
+            )
+            return
+
+        if ev == "chat":
+            # chat.final 作为兜底（session.message 订阅失败时也能看到 assistant 终稿）
+            state = payload.get("state")
+            if state != "final":
+                return
+            message = payload.get("message")
+            if not isinstance(message, dict):
+                return
+            normalized_list = _normalize_messages([message])
+            if not normalized_list:
+                return
+            normalized = normalized_list[0]
+            key = (
+                "chat-final",
+                normalized.get("role"),
+                message.get("timestamp"),
+                (normalized.get("text") or "")[:32],
+            )
+            if key in seen_keys:
+                return
+            seen_keys.add(key)
+            await self._send(
+                connection,
+                {"op": "stream.message", "message": normalized},
+            )
+            return
+
+        if ev == "agent":
+            stream = payload.get("stream")
+            data = payload.get("data") or {}
+            if stream == "assistant" and isinstance(data, dict):
+                delta = data.get("delta")
+                text_full = data.get("text")
+                if isinstance(delta, str) and delta:
+                    await self._send(
+                        connection,
+                        {
+                            "op": "stream.delta",
+                            "delta": delta,
+                            "text": text_full if isinstance(text_full, str) else None,
+                        },
+                    )
+                return
+            if stream == "lifecycle" and isinstance(data, dict):
+                phase = data.get("phase")
+                if phase in ("start", "end"):
+                    await self._send(
+                        connection,
+                        {"op": "stream.lifecycle", "phase": phase},
+                    )
+                return
+
 
 def _trim_events(events: list[dict[str, Any]], limit: int = 16) -> list[dict[str, Any]]:
     trimmed: list[dict[str, Any]] = []
@@ -343,26 +435,163 @@ def _trim_events(events: list[dict[str, Any]], limit: int = 16) -> list[dict[str
     return trimmed
 
 
+TOOL_RESULT_ROLES = {"tool", "toolResult", "tool_result", "function", "function_result"}
+TOOL_CALL_ROLES = {"toolUse", "tool_use", "tool_call"}
+
+
 def _normalize_messages(messages: list[Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for item in messages:
         if not isinstance(item, dict):
             continue
         role = item.get("role") or "system"
-        text = OpenClawGatewayClient.extract_reply_text([{"payload": item.get("content")}])
-        if not text:
-            content = item.get("content")
-            if isinstance(content, str):
-                text = content
+        text_bits: list[str] = []
+        parts: list[dict[str, Any]] = []
+        _walk_content(item.get("content"), text_bits, parts)
+        _maybe_emit_tool_part(item, parts)
+        text = "".join(text_bits).strip()
+
+        # 若整条消息语义上是 tool 的输入/输出（role 本身就是 toolResult / toolUse），
+        # 把"裸文本"的 content 搬进对应 part，避免被当成普通气泡文字。
+        if role in TOOL_RESULT_ROLES:
+            if text and not any(
+                p.get("kind") == "tool_output" and p.get("output") for p in parts
+            ):
+                parts.append(
+                    {
+                        "kind": "tool_output",
+                        "name": item.get("name")
+                        or item.get("tool_name")
+                        or item.get("toolName")
+                        or item.get("tool"),
+                        "output": text,
+                        "id": item.get("tool_call_id")
+                        or item.get("toolCallId")
+                        or item.get("call_id")
+                        or item.get("id"),
+                    }
+                )
+                text = ""
+        elif role in TOOL_CALL_ROLES:
+            if text and not any(p.get("kind") == "tool_call" for p in parts):
+                parts.append(
+                    {
+                        "kind": "tool_call",
+                        "name": item.get("name")
+                        or item.get("tool_name")
+                        or item.get("toolName"),
+                        "input": text,
+                        "id": item.get("id")
+                        or item.get("tool_use_id")
+                        or item.get("toolCallId")
+                        or item.get("call_id"),
+                    }
+                )
+                text = ""
+
+        message_id = (item.get("__openclaw") or {}).get("id") if isinstance(item.get("__openclaw"), dict) else None
+
         out.append(
             {
                 "role": role,
                 "text": text,
+                "parts": parts,
                 "timestamp": item.get("timestamp"),
                 "error_message": item.get("errorMessage"),
+                "message_id": message_id,
             }
         )
     return out
+
+
+def _walk_content(value: Any, text_bits: list[str], parts: list[dict[str, Any]]) -> None:
+    if value is None:
+        return
+    if isinstance(value, str):
+        if value.strip():
+            text_bits.append(value)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _walk_content(item, text_bits, parts)
+        return
+    if not isinstance(value, dict):
+        return
+
+    ctype = value.get("type") or value.get("role") or value.get("kind")
+
+    if ctype in ("tool_use", "tool_call", "function_call", "toolCall", "toolUse"):
+        parts.append(_tool_call_part(value))
+        return
+    if ctype in (
+        "tool_result",
+        "tool_output",
+        "function_output",
+        "function_response",
+        "toolResult",
+        "toolOutput",
+    ):
+        parts.append(_tool_output_part(value))
+        return
+    if ctype in ("thinking", "reasoning"):
+        thinking_text = value.get("text") or value.get("content") or value.get("thinking")
+        if isinstance(thinking_text, str) and thinking_text.strip():
+            parts.append({"kind": "thinking", "text": thinking_text.strip()})
+        return
+    if ctype == "text":
+        inner = value.get("text")
+        if isinstance(inner, str) and inner.strip():
+            text_bits.append(inner)
+        return
+
+    # generic recursion for nested shapes we don't yet recognize
+    for key in ("text", "content", "message", "parts", "output", "body"):
+        nested = value.get(key)
+        if nested is not None:
+            _walk_content(nested, text_bits, parts)
+
+
+def _maybe_emit_tool_part(item: dict[str, Any], parts: list[dict[str, Any]]) -> None:
+    # 某些实现把 tool call 挂在 assistant message 的 tool_calls 字段
+    tool_calls = item.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for tc in tool_calls:
+            if isinstance(tc, dict):
+                parts.append(_tool_call_part(tc))
+
+
+def _tool_call_part(value: dict[str, Any]) -> dict[str, Any]:
+    name = value.get("name")
+    if not name:
+        fn = value.get("function")
+        if isinstance(fn, dict):
+            name = fn.get("name")
+    args = (
+        value.get("input")
+        or value.get("arguments")
+        or value.get("args")
+        or value.get("parameters")
+    )
+    if args is None and isinstance(value.get("function"), dict):
+        args = value["function"].get("arguments")
+    return {
+        "kind": "tool_call",
+        "name": name,
+        "input": args,
+        "id": value.get("id") or value.get("call_id") or value.get("tool_use_id"),
+    }
+
+
+def _tool_output_part(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "kind": "tool_output",
+        "name": value.get("name") or value.get("tool") or value.get("tool_name"),
+        "output": value.get("output") or value.get("content") or value.get("result"),
+        "id": value.get("id")
+        or value.get("tool_use_id")
+        or value.get("tool_call_id")
+        or value.get("call_id"),
+    }
 
 
 def _make_parser() -> argparse.ArgumentParser:

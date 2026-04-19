@@ -176,6 +176,7 @@ button {
   flex: 1;
   display: grid;
   grid-template-columns: 300px minmax(480px, 1fr) 340px;
+  grid-template-rows: minmax(0, 1fr);
   gap: 18px;
   min-height: 0;
 }
@@ -189,6 +190,7 @@ button {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
   overflow: hidden;
 }
 
@@ -562,8 +564,48 @@ button {
 }
 .thread-meta {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
+}
+.toggles {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #ffffff;
+  padding: 2px;
+  gap: 2px;
+}
+.toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.8px;
+  color: var(--ink-dim);
+  transition: background 0.12s, color 0.12s;
+}
+.toggle-btn:hover {
+  color: var(--blue);
+}
+.toggle-btn.on {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+.toggle-btn.on.toggle-thinking {
+  background: #fef3c7;
+  color: #b45309;
+}
+.toggle-ico {
+  font-size: 12px;
+  line-height: 1;
+}
+.toggle-label {
+  font-weight: 600;
 }
 .chip {
   display: inline-flex;
@@ -657,8 +699,10 @@ button {
 }
 
 .messages {
-  flex: 1;
+  flex: 1 1 0;
+  min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 18px 22px;
   list-style: none;
   margin: 0;
@@ -666,6 +710,11 @@ button {
   flex-direction: column;
   gap: 14px;
   scrollbar-width: thin;
+}
+/* 防止 flex 把每张消息/卡片压扁——它们必须保持自己的自然高度，
+ * 由 .messages 容器统一滚动。 */
+.messages > * {
+  flex: 0 0 auto;
 }
 .messages:empty::after {
   content: "请先连接 operator，并创建或选择一个 session 开始诊断";
@@ -745,6 +794,169 @@ button {
 @keyframes blink {
   50% { opacity: 0; }
 }
+
+/* ------------------------------------------------------------------
+ * Tool call / Tool output / Thinking 卡片（嵌在消息流中）
+ * ------------------------------------------------------------------ */
+
+.tool-card,
+.think-card {
+  list-style: none;
+  align-self: stretch;
+  max-width: 78%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fbfcff;
+  overflow: hidden;
+}
+.tool-card {
+  border-left: 3px solid var(--api);
+}
+.tool-card[data-kind="tool_output"] {
+  border-left-color: var(--sql);
+}
+.think-card {
+  border-left: 3px solid var(--llm);
+  background: #fffdf5;
+}
+
+.tool-head,
+.think-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+.tool-head:hover,
+.think-head:hover {
+  background: rgba(43, 92, 255, 0.04);
+}
+.tool-caret {
+  display: inline-block;
+  width: 12px;
+  font-size: 10px;
+  color: var(--ink-soft);
+  transition: transform 0.12s;
+}
+.tool-bolt {
+  color: var(--blue);
+  font-size: 12px;
+}
+.think-ico {
+  font-size: 13px;
+}
+.tool-kind {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.8px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.tool-card[data-kind="tool_call"] .tool-kind { color: #15803d; }
+.tool-card[data-kind="tool_output"] .tool-kind { color: #4d6b00; }
+.think-card .tool-kind { color: #b45309; }
+.tool-name {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-dim);
+  margin-left: 4px;
+}
+.tool-preview {
+  flex: 1;
+  min-width: 0;
+  margin-left: 10px;
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+  opacity: 0.85;
+}
+.tool-card:not(.collapsed) .tool-preview,
+.think-card.expanded .tool-preview {
+  display: none;
+}
+
+.tool-body {
+  border-top: 1px dashed var(--line);
+  padding: 8px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: #ffffff;
+}
+.tool-card.collapsed .tool-body { display: none; }
+.tool-card.collapsed .tool-caret { transform: rotate(-90deg); }
+
+.tool-section-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-dim);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 1.1px;
+  cursor: pointer;
+  text-align: left;
+}
+.tool-section-head:hover { color: var(--blue); }
+.tool-section-head .caret {
+  display: inline-block;
+  width: 10px;
+  font-size: 9px;
+  transition: transform 0.12s;
+}
+.tool-section.collapsed .caret { transform: rotate(-90deg); }
+.tool-section.collapsed .tool-pre { display: none; }
+
+.tool-pre {
+  margin: 4px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8faff;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+  min-height: calc(1.5em * 4 + 20px); /* 保证展开时至少 4 行可见 */
+}
+.tool-card[data-kind="tool_output"] .tool-pre { background: #fbfee7; }
+.think-card .think-body {
+  margin: 0;
+  border: 0;
+  border-top: 1px dashed var(--line);
+  background: #fffdf5;
+  color: #7c2d12;
+  border-radius: 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+.think-card.expanded .tool-caret { transform: rotate(0); }
+.think-card.expanded .think-body { display: block !important; }
+.think-card .tool-caret { transform: rotate(-90deg); }
+.think-card.expanded .tool-caret { transform: rotate(0); }
+
+/* 隐藏开关控制：可用 class 在 messages 容器上控制批量显隐 */
+.messages.hide-tools .tool-card { display: none; }
+.messages.hide-think .think-card { display: none; }
 
 /* ------------------------------------------------------------------
  * 输入区

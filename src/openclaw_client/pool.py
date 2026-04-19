@@ -19,7 +19,7 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import websockets
 from websockets.asyncio.client import ClientConnection
@@ -40,8 +40,8 @@ DEFAULT_STORE_PATH = Path.home() / ".openclaw-cli" / "session-map.json"
 DEFAULT_URL = "ws://127.0.0.1:18789"
 DEFAULT_PASSWORD = "zxt2000"
 DEFAULT_CONCURRENCY = 4
-DEFAULT_RESPONSE_TIMEOUT = 60.0
-DEFAULT_SETTLE_TIMEOUT = 1.0
+DEFAULT_RESPONSE_TIMEOUT = 120.0
+DEFAULT_SETTLE_TIMEOUT = 30.0
 RECONNECT_BACKOFF_MIN = 1.0
 RECONNECT_BACKOFF_MAX = 30.0
 STORE_VERSION = 1
@@ -265,8 +265,13 @@ class FrameRouter:
             session_key = _extract_session_key(frame)
             if not session_key:
                 return
-            for sub in list(self._subs_by_session.get(session_key, [])):
-                sub.queue.put_nowait(frame)
+            # Exact or suffix match: gateway often namespaces events with
+            # `agent:<agentId>:<sessionKey>`, so a subscription for `chat:foo:bar`
+            # should also receive `agent:main:chat:foo:bar` events.
+            for sk_sub, waiters in list(self._subs_by_session.items()):
+                if session_key == sk_sub or session_key.endswith(":" + sk_sub):
+                    for sub in list(waiters):
+                        sub.queue.put_nowait(frame)
             return
 
     async def _fail_all(self, exc: BaseException) -> None:
@@ -561,6 +566,8 @@ class OpenClawSessionPool:
         response_timeout: float = DEFAULT_RESPONSE_TIMEOUT,
         settle_timeout: float = DEFAULT_SETTLE_TIMEOUT,
         fallback_history: bool = True,
+        on_event: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        subscribe_transcript: bool = True,
     ) -> RequestResult:
         binding = self._store.get(user)
         if binding is None:
@@ -575,6 +582,8 @@ class OpenClawSessionPool:
                 response_timeout=response_timeout,
                 settle_timeout=settle_timeout,
                 fallback_history=fallback_history,
+                on_event=on_event,
+                subscribe_transcript=subscribe_transcript,
             )
 
     async def history(
@@ -614,11 +623,32 @@ async def _send_via_router(
     response_timeout: float,
     settle_timeout: float,
     fallback_history: bool,
+    on_event: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    subscribe_transcript: bool = True,
 ) -> RequestResult:
     req_id = f"req-{uuid.uuid4().hex}"
     idem_key = f"req-{uuid.uuid4().hex}"
     sub = await router.subscribe(req_id, session_key)
+    transcript_subscribed = False
     try:
+        if subscribe_transcript:
+            # 开启 gateway 侧的 transcript 事件流；每条新 message（toolCall /
+            # toolResult / thinking / assistant 等）会通过 `session.message`
+            # 事件推送给我们，让前端真正流式看到每一步。
+            try:
+                await _request_via_router(
+                    router=router,
+                    method="sessions.messages.subscribe",
+                    params={"key": session_key},
+                    session_key=session_key,
+                    timeout=5.0,
+                )
+                transcript_subscribed = True
+            except PoolError:
+                # 老版本 gateway 没这个 RPC；失败就退回「只有 assistant delta +
+                # 结尾靠 chat.history 兜底」的模式。
+                transcript_subscribed = False
+
         params = {
             "sessionKey": session_key,
             "message": message,
@@ -668,6 +698,11 @@ async def _send_via_router(
             frame_type = frame.get("type")
             if frame_type == "event":
                 events.append(frame)
+                if on_event is not None:
+                    try:
+                        await on_event(frame)
+                    except Exception:
+                        _logger.exception("on_event callback failed")
                 if response is not None and OpenClawGatewayClient._is_terminal_agent_event(frame):
                     return await _finalize(
                         router=router,
@@ -687,6 +722,17 @@ async def _send_via_router(
                 if reply:
                     return RequestResult(response=frame, events=events, reply_text=reply)
     finally:
+        if transcript_subscribed:
+            try:
+                await _request_via_router(
+                    router=router,
+                    method="sessions.messages.unsubscribe",
+                    params={"key": session_key},
+                    session_key=session_key,
+                    timeout=3.0,
+                )
+            except Exception:
+                pass
         await router.unsubscribe(sub)
 
 

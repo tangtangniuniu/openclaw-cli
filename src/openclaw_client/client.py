@@ -396,6 +396,12 @@ class OpenClawGatewayClient:
         if isinstance(payload, dict):
             if payload.get("done") is True or payload.get("completed") is True or payload.get("finished") is True:
                 return True
+            # OpenClaw gateway: `{event: "agent", payload: {stream: "lifecycle", data: {phase: "end"}}}`
+            data = payload.get("data")
+            if isinstance(data, dict):
+                phase = str(data.get("phase") or "").lower()
+                if phase in ("end", "finished", "done", "completed"):
+                    return True
         return False
 
     @classmethod

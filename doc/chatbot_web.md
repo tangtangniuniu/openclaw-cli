@@ -87,6 +87,40 @@ session 会同时清理两边。
 - 发送消息：`send` 后立即在消息流插入一条 `{operatorId},收到` 的占位
   bubble（例如 `alice,收到`），收到 `reply.done` 时替换为真实回复，同时右侧
   inspector 把事件列表和 CoT 更新。
+- **Tool call / Tool output 卡片**：`chat.history` 里以 `role=assistant + 
+  type=toolCall` / `role=toolResult` 两种形态成对出现；前端按 tool 名把输入
+  输出各自渲染成一张独立卡片，嵌在消息流里。卡片头可整体折叠，折叠时显示
+  首行预览（比如 tool_call 的 JSON 第一行）；展开时内容自适应高度，且最少
+  显示约 4 行文本再滚动。内部 `TOOL INPUT` / `TOOL OUTPUT` 小节也能单独
+  折叠，JSON 会自动格式化。
+- **思考块**：assistant 消息里的 `{type: "thinking"}` part、或回复文本中
+  `<think>…</think>` 片段，会被抽成独立的「Thinking」卡片（琥珀金边框），
+  默认收起并显示首行摘要；点击展开看完整推理。
+- **非 user/assistant 消息**：`toolResult` / `toolUse` / `developer` 这种
+  role 若仍有剩余纯文本，会用灰色系统气泡展示，role 名作为标签显示在气泡顶部。
+- **实时流式**：每次 `send` 会通过 `sessions.messages.subscribe` 订阅
+  gateway 的 transcript 通道；在消息逐步生成过程中，前端按以下 op 实时
+  推送并渲染：
+  - `stream.lifecycle`：`start` / `end`，更新右上角 LLM 状态文案；
+  - `stream.message`：每当 gateway 提交一条新消息（toolCall、toolResult、
+    thinking、assistant 终稿），立刻派一条过来，前端按
+    `message_id` (`__openclaw.id`) 去重，避免多次渲染同一条消息；
+  - `stream.delta`：assistant 生成过程中的增量文字，前端合并到「活动气泡」
+    里覆盖显示（不新增节点、不插入换行），看起来像一边说一边打字。
+  收到 `role=assistant` 且 `parts` 里只有 `tool_call` / `thinking`（没可见
+  正文）的 message 时，前端会**清掉** `{operatorId},收到` 占位气泡，把下
+  一次 `stream.delta` 开新气泡用。
+  reply 完成后再做一次 `history.refresh` 拿 gateway 权威视图兜底。
+- **布局 / 滚动**：顶层三栏 grid 用 `grid-template-rows: minmax(0, 1fr)`
+  锁死行高；`.messages` 自己 `overflow-y: auto` 独立滚动；消息/卡片
+  `flex: 0 0 auto`，任何长度的 tool pre/thinking 文本都**不会被 flex 压扁**，
+  超出就出现纵向滚动条，可以拖拉查看历史。
+- `<final>…</final>` 标签（模型用作最终答复标识）在渲染时会被剥掉，
+  只显示内部文字；`<think>…</think>` 仍会抽成 Thinking 卡片。
+- **右上角开关（持久到 localStorage，key `openclaw.chatbot.prefs`）**：
+  - 🧠 `THINK`：切换是否显示 Thinking 卡片，默认关。
+  - 🔧 `TOOLS`：切换是否显示 Tool call / Tool output 卡片，默认开。
+  关/开只改 CSS 可见性，不会清空已加载的消息。
 - 若回复里包含 `<think>…</think>` / `<final>…</final>` 这类常见标签，CoT
   会把 `<think>` 按行切成几个 bubble，把 `<final>` 作为最后高亮那一条。
 

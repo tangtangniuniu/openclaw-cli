@@ -250,6 +250,7 @@ async def test_send_via_router_collects_events_and_returns_response() -> None:
             response_timeout=5.0,
             settle_timeout=0.5,
             fallback_history=False,
+            subscribe_transcript=False,
         )
     finally:
         await producer_task
@@ -281,6 +282,7 @@ async def test_send_via_router_fails_on_connection_close() -> None:
                 response_timeout=5.0,
                 settle_timeout=0.5,
                 fallback_history=False,
+                subscribe_transcript=False,
             )
     finally:
         await closer_task
@@ -344,7 +346,13 @@ async def test_pool_send_routes_via_injected_router(tmp_path: Path, monkeypatch)
     producer_task = asyncio.create_task(producer())
     try:
         async with pool:
-            result = await pool.send("alice", "hi", response_timeout=5.0, fallback_history=False)
+            result = await pool.send(
+                "alice",
+                "hi",
+                response_timeout=5.0,
+                fallback_history=False,
+                subscribe_transcript=False,
+            )
     finally:
         await producer_task
         await router.close()

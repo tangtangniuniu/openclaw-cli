@@ -9,8 +9,12 @@ const state = {
   sessions: [],
   active: null,      // {id, name, session_key}
   messages: [],      // normalized from server
-  pending: null,     // DOM element for the pending assistant bubble
+  pending: null,     // DOM element for the streaming assistant bubble
+  liveText: "",      // accumulated streaming text
   lanesActive: 0,
+  showThinking: false,
+  showTools: true,
+  streamSeen: new Set(), // dedupe keys for stream.message
 };
 
 const els = {
@@ -42,9 +46,12 @@ const els = {
   metricUser: $("#metric-user"),
   metricKey: $("#metric-key"),
   metricLanes: $("#metric-lanes"),
+  toggleThinking: $("#toggle-thinking"),
+  toggleTools: $("#toggle-tools"),
 };
 
 const USERS_LS_KEY = "openclaw.chatbot.users";
+const PREFS_LS_KEY = "openclaw.chatbot.prefs";
 const MAX_USERS = 16;
 
 // ----------------------------------------------------------------
@@ -126,18 +133,42 @@ function handleServerMessage(msg) {
     case "history":
       state.messages = msg.messages || [];
       renderMessages();
+      // 一旦收到权威历史，清空流式去重 key，让下次发送能重新接收
+      state.streamSeen = new Set();
       break;
     case "reply.pending":
       state.lanesActive = Math.min(4, state.lanesActive + 1);
       updateLanes();
       els.llmState.textContent = "thinking…";
+      // 清空本轮 stream 去重
+      state.streamSeen = new Set();
+      // 移除上一个回合残留的 pending 气泡（如果有）
+      if (state.pending && state.pending.parentNode) {
+        state.pending.remove();
+      }
+      state.pending = null;
+      // 立刻放一个 "alice,收到" 占位气泡，流式 delta/message 来了就接管它
       appendPendingBubble();
       break;
+    case "stream.lifecycle":
+      // 仅用来更新右上角的 LLM 状态文案
+      els.llmState.textContent = msg.phase === "start" ? "running…" : "wrapping up…";
+      break;
+    case "stream.message": {
+      if (!msg.message) break;
+      applyStreamMessage(msg.message);
+      break;
+    }
+    case "stream.delta": {
+      ensureLiveAssistant();
+      appendLiveDelta(msg.delta || "", msg.text || null);
+      break;
+    }
     case "reply.done":
       state.lanesActive = Math.max(0, state.lanesActive - 1);
       updateLanes();
       els.llmState.textContent = "done";
-      finalizePendingBubble(msg.text || "(空回复)");
+      finalizeLiveAssistant(msg.text || "(空回复)");
       if (Array.isArray(msg.events)) renderEvents(msg.events);
       renderChainFromReply(msg.text || "");
       break;
@@ -145,7 +176,7 @@ function handleServerMessage(msg) {
       state.lanesActive = Math.max(0, state.lanesActive - 1);
       updateLanes();
       els.llmState.textContent = "error";
-      finalizePendingBubble(`⚠ 发送失败：${msg.message}`, true);
+      finalizeLiveAssistant(`⚠ 发送失败：${msg.message}`, true);
       break;
     case "error":
       appendSystemMessage(`⚠ ${msg.message}`);
@@ -209,20 +240,48 @@ function renderMessages() {
 }
 
 function appendMessageFrom(m) {
-  if (m.role === "user") {
-    appendUserMessage(m.text || "");
-  } else if (m.role === "assistant") {
-    appendAssistantMessage(m.text || "", m.error_message);
-  } else {
-    appendSystemMessage(m.text || "");
+  const parts = Array.isArray(m.parts) ? m.parts : [];
+  // 1) thinking parts first
+  for (const p of parts) {
+    if (p && p.kind === "thinking") appendThinkingCard(p.text || "");
   }
+  // 2) tool parts as collapsible cards
+  for (const p of parts) {
+    if (!p) continue;
+    if (p.kind === "tool_call") appendToolCard(p, "tool_call");
+    if (p.kind === "tool_output") appendToolCard(p, "tool_output");
+  }
+  // 3) main text bubble (<think> stripped out into a thinking card)
+  const { thinking, visible } = splitThinkFromText(m.text || "");
+  if (thinking) appendThinkingCard(thinking);
+  if (!visible) return;
+  if (m.role === "user") {
+    appendUserMessage(visible);
+  } else if (m.role === "assistant") {
+    appendAssistantMessage(visible, m.error_message);
+  } else {
+    // 任何其它 role（system/developer/toolResult/toolUse/自定义…）都渲染一个
+    // 带 role 标签的系统气泡；tool 消息里真正结构化的输入输出已经在 parts
+    // 里单独成卡，这里的 visible 只是剩余的纯文本或未被识别的内容。
+    appendSystemMessage(visible, m.role);
+  }
+}
+
+function splitThinkFromText(text) {
+  if (!text) return { thinking: "", visible: "" };
+  const matches = [...text.matchAll(/<think>([\s\S]*?)<\/think>/gi)];
+  const thinking = matches.map((m) => m[1].trim()).filter(Boolean).join("\n\n");
+  let visible = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  // 剥掉 <final>…</final> 的包裹标签，里面的内容就是最终回复
+  visible = visible.replace(/<\/?final>/gi, "").trim();
+  return { thinking, visible };
 }
 
 function appendUserMessage(text) {
   const tpl = $("#tpl-message-user");
   const frag = tpl.content.cloneNode(true);
   frag.querySelector(".msg-bubble").textContent = text;
-  els.messages.appendChild(frag);
+  insertMessageNode(frag);
   scrollToEnd();
 }
 
@@ -232,15 +291,18 @@ function appendAssistantMessage(text, errorMessage) {
   const bubble = frag.querySelector(".msg-bubble");
   bubble.textContent = text || errorMessage || "(空)";
   if (errorMessage) bubble.classList.add("msg-error");
-  els.messages.appendChild(frag);
+  insertMessageNode(frag);
   scrollToEnd();
 }
 
-function appendSystemMessage(text) {
+function appendSystemMessage(text, role) {
   const tpl = $("#tpl-message-system");
   const frag = tpl.content.cloneNode(true);
+  if (role && typeof role === "string") {
+    frag.querySelector(".msg-role").textContent = role.toUpperCase();
+  }
   frag.querySelector(".msg-bubble").textContent = text;
-  els.messages.appendChild(frag);
+  insertMessageNode(frag);
   scrollToEnd();
 }
 
@@ -251,29 +313,153 @@ function appendPendingBubble() {
   li.classList.add("msg-pending");
   const bubble = frag.querySelector(".msg-bubble");
   bubble.textContent = `${state.user || "operator"},收到`;
+  els.messages.appendChild(frag); // pending 总是在末尾
+  state.pending = li;
+  state.liveText = "";
+  scrollToEnd();
+  return li;
+}
+
+// 第一次收到 stream.delta 或 stream.message(role=assistant) 时创建一个活动气泡；
+// 若上次已有 pending，则复用它并把 "收到" 占位文字清空。
+function ensureLiveAssistant() {
+  if (state.pending && state.pending.parentNode) {
+    if (state.pending.classList.contains("msg-pending")) {
+      state.pending.querySelector(".msg-bubble").textContent = "";
+      state.pending.classList.remove("msg-pending");
+      state.liveText = "";
+    }
+    return state.pending;
+  }
+  const tpl = $("#tpl-message-assistant");
+  const frag = tpl.content.cloneNode(true);
+  const li = frag.querySelector("li");
+  frag.querySelector(".msg-bubble").textContent = "";
   els.messages.appendChild(frag);
   state.pending = li;
+  state.liveText = "";
+  scrollToEnd();
+  return li;
+}
+
+function appendLiveDelta(delta, full) {
+  const li = ensureLiveAssistant();
+  const bubble = li.querySelector(".msg-bubble");
+  if (typeof full === "string" && full.length >= state.liveText.length) {
+    // 优先用完整文本，确保和网关累积的全文一致
+    state.liveText = full;
+  } else {
+    state.liveText += delta || "";
+  }
+  const { visible } = splitThinkFromText(state.liveText);
+  bubble.textContent = visible || state.liveText;
   scrollToEnd();
 }
 
-function finalizePendingBubble(text, isError) {
+function finalizeLiveAssistant(finalText, isError) {
   if (!state.pending) {
-    if (isError) {
-      appendSystemMessage(text);
-    } else {
-      appendAssistantMessage(text);
-    }
+    if (isError) appendSystemMessage(finalText);
+    else if (finalText && finalText.trim()) appendAssistantMessage(finalText);
     return;
   }
-  state.pending.classList.remove("msg-pending");
   const bubble = state.pending.querySelector(".msg-bubble");
-  bubble.textContent = text;
+  // 如果 pending 还是 "alice,收到" 占位，不要把占位文字当 "打印过的内容"
+  const liveWas = state.liveText;
+  const candidate = finalText || liveWas || "";
+  const { thinking, visible } = splitThinkFromText(candidate);
+  const shown = visible || candidate;
+
+  if (thinking) {
+    const thinkingCard = buildThinkingCard(thinking);
+    state.pending.parentNode.insertBefore(thinkingCard, state.pending);
+  }
+
+  if (!shown || !shown.trim()) {
+    // 收尾时没有任何实际文字（这条 message 只有 tool_call / thinking）——
+    // 直接把占位 bubble 移除，让 tool 卡片自己占位。
+    state.pending.remove();
+    state.pending = null;
+    state.liveText = "";
+    return;
+  }
+
+  state.pending.classList.remove("msg-pending");
+  bubble.textContent = shown;
   if (isError) {
     state.pending.className = "msg msg-system";
     state.pending.querySelector(".msg-role").textContent = "SYSTEM";
   }
   state.pending = null;
+  state.liveText = "";
   scrollToEnd();
+}
+
+function buildThinkingCard(text) {
+  const tpl = $("#tpl-thinking-card");
+  const frag = tpl.content.cloneNode(true);
+  const li = frag.querySelector(".think-card");
+  const body = frag.querySelector(".think-body");
+  const preview = frag.querySelector(".tool-preview");
+  body.textContent = text;
+  if (preview) preview.textContent = firstLine(text);
+  const head = frag.querySelector(".think-head");
+  head.addEventListener("click", () => {
+    li.classList.toggle("expanded");
+    body.hidden = !li.classList.contains("expanded");
+  });
+  return li;
+}
+
+// 实时应用 stream.message（来自 gateway 的 session.message / chat state=final）
+function applyStreamMessage(message) {
+  if (!message) return;
+  // user message 已经在本地 onComposerSubmit 即时渲染，避免重复
+  if (message.role === "user") return;
+
+  const key =
+    message.message_id ||
+    JSON.stringify([
+      message.role,
+      message.timestamp,
+      (message.text || "").slice(0, 40),
+      (message.parts || [])
+        .map((p) => `${p.kind}:${p.name || ""}:${p.id || ""}`)
+        .join("|"),
+    ]);
+  if (state.streamSeen.has(key)) return;
+  state.streamSeen.add(key);
+
+  const parts = Array.isArray(message.parts) ? message.parts : [];
+  const { thinking: inlineThink, visible } = splitThinkFromText(message.text || "");
+
+  // 1) thinking part / inline <think> 块 —— 各自一张折叠卡
+  for (const p of parts) {
+    if (p && p.kind === "thinking") appendThinkingCard(p.text || "");
+  }
+  if (inlineThink) appendThinkingCard(inlineThink);
+
+  // 2) tool_call / tool_output —— 各自一张折叠卡
+  for (const p of parts) {
+    if (!p) continue;
+    if (p.kind === "tool_call") appendToolCard(p, "tool_call");
+    if (p.kind === "tool_output") appendToolCard(p, "tool_output");
+  }
+
+  // 3) 主文本气泡：assistant 用活动气泡收尾；其它 role 用系统气泡
+  if (message.role === "assistant") {
+    if (visible && visible.trim()) {
+      finalizeLiveAssistant(visible, false);
+    } else if (parts.length > 0) {
+      // 只有 tool_call / thinking 的 assistant 消息：把占位 bubble 清掉
+      if (state.pending) {
+        state.pending.remove();
+        state.pending = null;
+        state.liveText = "";
+      }
+    }
+  } else if (visible && visible.trim()) {
+    appendSystemMessage(visible, message.role);
+  }
 }
 
 function renderEvents(events) {
@@ -321,11 +507,173 @@ function updateLanes() {
 }
 
 // ----------------------------------------------------------------
+// Tool / thinking cards
+// ----------------------------------------------------------------
+
+function appendToolCard(part, kind) {
+  const tpl = $("#tpl-tool-card");
+  const frag = tpl.content.cloneNode(true);
+  const li = frag.querySelector(".tool-card");
+  li.dataset.kind = kind;
+
+  const label = kind === "tool_call" ? "Tool call" : "Tool output";
+  li.querySelector(".tool-kind").textContent = label;
+  li.querySelector(".tool-name").textContent = part.name || "";
+
+  // head: 折叠/展开整个卡
+  const head = li.querySelector(".tool-head");
+  head.addEventListener("click", () => {
+    li.classList.toggle("collapsed");
+    head.setAttribute(
+      "aria-expanded",
+      li.classList.contains("collapsed") ? "false" : "true"
+    );
+  });
+
+  const inputSec = li.querySelector(".tool-input");
+  const outputSec = li.querySelector(".tool-output");
+  const preview = li.querySelector(".tool-preview");
+  let previewText = "";
+
+  if (part.input !== undefined && part.input !== null && kind === "tool_call") {
+    inputSec.hidden = false;
+    const formatted = prettyJson(part.input);
+    inputSec.querySelector(".tool-input-pre").textContent = formatted;
+    wireSectionToggle(inputSec);
+    previewText = firstLine(formatted);
+  }
+  if (part.output !== undefined && part.output !== null && kind === "tool_output") {
+    outputSec.hidden = false;
+    const formatted = prettyJson(part.output);
+    outputSec.querySelector(".tool-output-pre").textContent = formatted;
+    wireSectionToggle(outputSec);
+    previewText = firstLine(formatted);
+  }
+
+  if (previewText) {
+    preview.textContent = previewText;
+  }
+
+  // 默认折叠 output（内容通常较大），call 默认展开
+  if (kind === "tool_output") li.classList.add("collapsed");
+
+  insertMessageNode(frag);
+  scrollToEnd();
+}
+
+function appendThinkingCard(text) {
+  if (!text) return;
+  const tpl = $("#tpl-thinking-card");
+  const frag = tpl.content.cloneNode(true);
+  const li = frag.querySelector(".think-card");
+  const body = frag.querySelector(".think-body");
+  const preview = frag.querySelector(".tool-preview");
+  body.textContent = text;
+  if (preview) preview.textContent = firstLine(text);
+  const head = frag.querySelector(".think-head");
+  head.addEventListener("click", () => {
+    li.classList.toggle("expanded");
+    const expanded = li.classList.contains("expanded");
+    body.hidden = !expanded;
+    head.setAttribute("aria-expanded", expanded ? "true" : "false");
+  });
+  insertMessageNode(frag);
+  scrollToEnd();
+}
+
+function wireSectionToggle(section) {
+  const head = section.querySelector(".tool-section-head");
+  head.addEventListener("click", () => {
+    section.classList.toggle("collapsed");
+    head.setAttribute(
+      "aria-expanded",
+      section.classList.contains("collapsed") ? "false" : "true"
+    );
+  });
+}
+
+function firstLine(s, n = 120) {
+  if (!s) return "";
+  const first = String(s).split(/\n/).map((x) => x.trim()).find((x) => x.length > 0) || "";
+  return first.length > n ? first.slice(0, n) + "…" : first;
+}
+
+function prettyJson(value) {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        return JSON.stringify(JSON.parse(trimmed), null, 2);
+      } catch {}
+    }
+    return value;
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+// ----------------------------------------------------------------
+// Preferences (show thinking / tools) — localStorage backed
+// ----------------------------------------------------------------
+
+function loadPrefs() {
+  try {
+    const raw = localStorage.getItem(PREFS_LS_KEY);
+    if (!raw) return {};
+    const obj = JSON.parse(raw);
+    return obj && typeof obj === "object" ? obj : {};
+  } catch {
+    return {};
+  }
+}
+
+function savePrefs() {
+  try {
+    localStorage.setItem(
+      PREFS_LS_KEY,
+      JSON.stringify({
+        showThinking: state.showThinking,
+        showTools: state.showTools,
+      })
+    );
+  } catch {}
+}
+
+function applyToggles() {
+  els.messages.classList.toggle("hide-think", !state.showThinking);
+  els.messages.classList.toggle("hide-tools", !state.showTools);
+  els.toggleThinking.classList.toggle("on", state.showThinking);
+  els.toggleThinking.classList.toggle("toggle-thinking", true);
+  els.toggleThinking.setAttribute(
+    "aria-pressed",
+    state.showThinking ? "true" : "false"
+  );
+  els.toggleTools.classList.toggle("on", state.showTools);
+  els.toggleTools.setAttribute(
+    "aria-pressed",
+    state.showTools ? "true" : "false"
+  );
+}
+
+// ----------------------------------------------------------------
 // helpers
 // ----------------------------------------------------------------
 
 function scrollToEnd() {
   els.messages.scrollTop = els.messages.scrollHeight;
+}
+
+// 插入新消息时，若有活跃 pending（流式占位气泡），把新节点放在 pending 之前，
+// 让 pending 保持在末尾表示"下一个要填进来的回复"。
+function insertMessageNode(nodeOrFrag) {
+  if (state.pending && state.pending.parentNode === els.messages) {
+    els.messages.insertBefore(nodeOrFrag, state.pending);
+  } else {
+    els.messages.appendChild(nodeOrFrag);
+  }
 }
 
 function formatTs(ts) {
@@ -533,6 +881,11 @@ document.addEventListener("click", (ev) => {
 // ----------------------------------------------------------------
 
 function init() {
+  // restore prefs first so first render respects them
+  const prefs = loadPrefs();
+  state.showThinking = !!prefs.showThinking;
+  state.showTools = prefs.showTools !== false; // default true
+
   els.opConnect.addEventListener("click", onConnectClick);
   els.userInput.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter") onConnectClick();
@@ -546,8 +899,19 @@ function init() {
   els.messageInput.addEventListener("keydown", onInputKey);
   els.toolsBtn.addEventListener("click", onToolsBtnClick);
   els.toolsMenu.addEventListener("click", onToolSelect);
+  els.toggleThinking.addEventListener("click", () => {
+    state.showThinking = !state.showThinking;
+    savePrefs();
+    applyToggles();
+  });
+  els.toggleTools.addEventListener("click", () => {
+    state.showTools = !state.showTools;
+    savePrefs();
+    applyToggles();
+  });
   autosize(els.messageInput);
   renderSavedUsers();
+  applyToggles();
   // 默认把历史里的第一个填进输入框（如果当前输入框是默认值），省一次手动挑选
   const users = loadSavedUsers();
   if (users.length && els.userInput.value === "alice" && !users.includes("alice")) {
