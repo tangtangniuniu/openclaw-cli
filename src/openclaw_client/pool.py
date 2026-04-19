@@ -476,6 +476,20 @@ class FairScheduler:
     def available(self) -> int:
         return self._sem._value  # type: ignore[attr-defined]
 
+    @property
+    def active(self) -> int:
+        """当前占用中的 slot 数量。"""
+        return self._capacity - self.available
+
+    @property
+    def queued(self) -> int:
+        """正在等待 slot 的协程数（即阻塞中的请求数）。"""
+        waiters = getattr(self._sem, "_waiters", None)
+        if waiters is None:
+            return 0
+        # 过滤已完成（可能来自内部状态）的 Future
+        return sum(1 for w in waiters if not w.done())
+
     @asynccontextmanager
     async def slot(self, key: str):
         await self._sem.acquire()
@@ -599,6 +613,44 @@ class OpenClawSessionPool:
         payload = frame.get("payload") or {}
         messages = payload.get("messages")
         return messages if isinstance(messages, list) else []
+
+    # -- 直接 send / 统计（多会话并发场景用，不依赖单用户绑定） --
+
+    async def send_with_key(
+        self,
+        session_key: str,
+        message: str,
+        *,
+        slot_key: str | None = None,
+        response_timeout: float = DEFAULT_RESPONSE_TIMEOUT,
+        settle_timeout: float = DEFAULT_SETTLE_TIMEOUT,
+        fallback_history: bool = True,
+    ) -> RequestResult:
+        """直接按 gateway sessionKey 发送消息，跳过单用户绑定。
+
+        - `slot_key` 仅用于调度器内部调试/标识（目前是全局 semaphore，不影响公平性）。
+        - 典型用途是多 (user, session) 会话在同一条 WS 上并发。
+        """
+        if not session_key:
+            raise ValueError("session_key is required")
+        async with self._scheduler.slot(slot_key or session_key):
+            router = await self._supervisor.get_router()
+            return await _send_via_router(
+                router=router,
+                session_key=session_key,
+                message=message,
+                response_timeout=response_timeout,
+                settle_timeout=settle_timeout,
+                fallback_history=fallback_history,
+            )
+
+    def scheduler_stats(self) -> dict[str, int]:
+        """返回调度器快照：capacity / active / queued。"""
+        return {
+            "capacity": self._scheduler.capacity,
+            "active": self._scheduler.active,
+            "queued": self._scheduler.queued,
+        }
 
 
 # ---------------------------------------------------------------------------

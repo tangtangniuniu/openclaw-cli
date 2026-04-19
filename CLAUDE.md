@@ -148,8 +148,14 @@ chatbot/                  Web chatbot 前端（HTTP + WS 同端口）
   ├── server.py             websockets.serve + process_request 桥接到 OpenClawSessionPool
   ├── user_sessions.py      UserSessionsStore：每用户拥有的 session 列表（独立于 pool 绑定）
   └── static/               index.html / app.css / app.js，FUI 扁平风格
+multi_chatbot/            多用户多会话并发测试 chatbot（端口 5273）
+  ├── server.py             WS 协议：config.save / run.start / run.stop / stats
+  ├── config_store.py       「用户 → 会话 → 预设提问」三层树持久化
+  ├── runner.py             ConcurrentRunner：每条 (user, session) 一条 asyncio task
+  └── static/               三栏 UI：左编辑器 / 中 2 列聊天网格 / 右并发面板
 demo/                     四类 Gateway 接口 + 会话池的演示脚本
 doc/                      中文文档：gateway_interfaces.md、session_pool.md、chatbot_web.md、
+                          multi_chatbot_web.md（并发测试 UI）、
                           diagnostic_agent_video_prompts.md（mock 英文版 + 9 阶段视频 prompt）
 scripts/                  systemctl --user 的封装 + 联调脚本
 tests/unit/               单元测试，monkeypatch FakeWebSocket
@@ -179,10 +185,30 @@ tests/e2e/                端到端测试，`-m e2e` 标记，连真实 Gateway
   在一条 WS 上并发飞行。
 - **并发控制**：`FairScheduler(capacity=4)` 对齐 OpenClaw 主 agent 车道；单
   用户单会话单请求假设下，`asyncio.Semaphore` 的 FIFO 即公平。
+  `scheduler_stats()` 暴露 `{capacity, active, queued}`，queued 是在
+  semaphore 上排队的 waiter 数，也就是前端显示的「阻塞中」计数。
 - **自动重连**：`ConnectionSupervisor._supervise` 指数退避重连；在飞请求会
   收到 `__router_closed__` 标记，`send()` 抛 `PoolError`，上层自行重试。
+- **两条 send 路径**：`send(user, text)` 走单用户绑定（chatbot/ 用），
+  `send_with_key(session_key, text)` 直接按 gateway sessionKey 发送，跳过
+  SessionStore（multi_chatbot/ 用）。两者共用 scheduler slot。
 - **复用边界**：握手复用 `device_auth.build_signed_device`，文本抽取复用
   `OpenClawGatewayClient.extract_reply_text / _is_terminal_agent_event /
   _extract_reply_from_history` 三个静态方法；`client.py` 不应被改动以支持池
   化场景，一律走新模块。
+
+## Multi-chatbot Web 要点（`multi_chatbot/`）
+
+- **定位**：`chatbot/` 是单用户一次一个会话，`multi_chatbot/` 在同一页面里
+  同时驱动 N 个 (user, session) 对 gateway 发送预设提问清单，用来观察
+  `FairScheduler` 满载时的 active/queued 行为。
+- **端口 5273**；启动脚本 `run_multi_web.sh`，详见 `doc/multi_chatbot_web.md`。
+- **存储分离**：左侧树保存到 `~/.openclaw-cli/multi-chatbot-config.json`，
+  每次输入改动后 400ms debounce 自动保存；不调用 `pool.bind()`，不污染
+  chatbot/ 共用的 `session-map.json`。
+- **车道模型**：每条 (user, session) = 一个 asyncio task，内部顺序 `pool.
+  send_with_key()` 问完所有 questions；多条车道并发竞争 scheduler slot。
+- **前端三栏**：左编辑器（树形 users → sessions → questions）、中 2 列
+  聊天窗口网格（每窗口高度 ≈ 视口 1/3，整体 Y 滚动）、右并发面板（
+  capacity/active/queued 进度条 + lane 列表 + 开始/停止按钮）。
 
