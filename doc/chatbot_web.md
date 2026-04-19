@@ -117,6 +117,15 @@ session 会同时清理两边。
   超出就出现纵向滚动条，可以拖拉查看历史。
 - `<final>…</final>` 标签（模型用作最终答复标识）在渲染时会被剥掉，
   只显示内部文字；`<think>…</think>` 仍会抽成 Thinking 卡片。
+- **右侧 inspector 的 Tool events 面板**：把原始事件流压缩成每行一条的紧凑
+  展示，而不是每个 token 都占一行：
+  - `session.message`：一行展示 role + content 里的 part 类型（例如
+    `assistant · toolCall·text`），detail 里跟一段内容摘要；
+  - `agent.assistant` 流式 delta 被合并为同一条 `×N` 计数；
+  - `chat.delta` 同样合并成一条；
+  - `agent.lifecycle` 保留 start/end 两行；
+  - `health` / `tick` 这类噪声事件直接过滤掉。
+  顶部状态文字显示 `<condensed_rows> · <raw_count> raw`，方便对比。
 - **右上角开关（持久到 localStorage，key `openclaw.chatbot.prefs`）**：
   - 🧠 `THINK`：切换是否显示 Thinking 卡片，默认关。
   - 🔧 `TOOLS`：切换是否显示 Tool call / Tool output 卡片，默认开。

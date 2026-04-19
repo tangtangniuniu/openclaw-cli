@@ -468,19 +468,156 @@ function renderEvents(events) {
     els.toolState.textContent = "—";
     return;
   }
-  els.toolState.textContent = `${events.length} events`;
-  for (const ev of events.slice(0, 12)) {
+  const rows = condenseEvents(events);
+  els.toolState.textContent = `${rows.length} · ${events.length} raw`;
+  for (const row of rows) {
     const li = document.createElement("li");
-    const name = document.createElement("span");
-    name.className = "ev-name";
-    name.textContent = ev.event || "(unnamed)";
-    const payload = document.createElement("span");
-    payload.className = "ev-payload";
-    payload.textContent = truncate(JSON.stringify(ev.payload ?? {}), 140);
-    li.appendChild(name);
-    li.appendChild(payload);
+    if (row.kind) li.dataset.kind = row.kind;
+    const badge = document.createElement("span");
+    badge.className = "ev-badge";
+    badge.textContent = row.badge;
+    const label = document.createElement("span");
+    label.className = "ev-label";
+    label.textContent = row.label;
+    const detail = document.createElement("span");
+    detail.className = "ev-detail";
+    detail.textContent = row.detail || "";
+    li.appendChild(badge);
+    li.appendChild(label);
+    if (row.detail) li.appendChild(detail);
+    if (row.count > 1) {
+      const count = document.createElement("span");
+      count.className = "ev-count";
+      count.textContent = "×" + row.count;
+      li.appendChild(count);
+    }
     els.toolEvents.appendChild(li);
   }
+}
+
+function condenseEvents(events) {
+  const out = [];
+  const pushOrMerge = (kind, row) => {
+    const last = out[out.length - 1];
+    if (last && last.kind === kind) {
+      last.count++;
+      if (row.detail) last.detail = row.detail; // keep last seen sample
+      return;
+    }
+    out.push({ kind, count: 1, ...row });
+  };
+
+  for (const ev of events) {
+    const name = ev.event || "(unnamed)";
+    const payload = ev.payload || {};
+    if (name === "health" || name === "tick") continue;
+
+    if (name === "agent") {
+      const stream = payload.stream;
+      const data = payload.data || {};
+      if (stream === "assistant") {
+        const delta = String(data.delta || "").replace(/\n/g, "⏎");
+        pushOrMerge("agent-assistant", {
+          badge: "AGENT",
+          label: "assistant · delta",
+          detail: truncate(delta, 48),
+        });
+        continue;
+      }
+      if (stream === "lifecycle") {
+        out.push({
+          kind: "agent-lifecycle",
+          count: 1,
+          badge: "AGENT",
+          label: `lifecycle · ${data.phase || "?"}`,
+          detail: "",
+        });
+        continue;
+      }
+      out.push({
+        kind: "agent-other",
+        count: 1,
+        badge: "AGENT",
+        label: stream || "agent",
+        detail: truncate(JSON.stringify(data), 64),
+      });
+      continue;
+    }
+
+    if (name === "chat") {
+      const state = payload.state;
+      const msg = payload.message || {};
+      if (state === "delta") {
+        pushOrMerge("chat-delta", {
+          badge: "CHAT",
+          label: `${msg.role || "?"} · delta`,
+          detail: "",
+        });
+        continue;
+      }
+      out.push({
+        kind: "chat-final",
+        count: 1,
+        badge: "CHAT",
+        label: `${msg.role || "?"} · ${state || ""}`,
+        detail: briefContent(msg.content),
+      });
+      continue;
+    }
+
+    if (name === "session.message") {
+      const msg = payload.message || {};
+      const cTypes = Array.isArray(msg.content)
+        ? msg.content
+            .map((x) => (x && x.type) || "?")
+            .filter(Boolean)
+            .join("·")
+        : typeof msg.content === "string"
+        ? "text"
+        : "";
+      out.push({
+        kind: `session-${msg.role || "unknown"}`,
+        count: 1,
+        badge: "MSG",
+        label: `${msg.role || "?"}${cTypes ? " · " + cTypes : ""}`,
+        detail: briefContent(msg.content),
+      });
+      continue;
+    }
+
+    out.push({
+      kind: "misc",
+      count: 1,
+      badge: name.slice(0, 8).toUpperCase(),
+      label: name,
+      detail: truncate(JSON.stringify(payload), 64),
+    });
+  }
+  return out;
+}
+
+function briefContent(content) {
+  if (!content) return "";
+  if (typeof content === "string") {
+    return truncate(content.replace(/\s+/g, " "), 80);
+  }
+  if (Array.isArray(content)) {
+    const bits = content
+      .map((x) => {
+        if (!x) return "";
+        if (x.type === "text") return truncate(String(x.text || ""), 40);
+        if (x.type === "toolCall" || x.type === "tool_use" || x.type === "tool_call") {
+          const args = x.arguments ?? x.input ?? x.args ?? {};
+          return `${x.name || "?"}(${truncate(JSON.stringify(args), 32)})`;
+        }
+        if (x.type === "toolResult" || x.type === "tool_result") return "⇐ " + truncate(String(x.content || ""), 40);
+        if (x.type === "thinking") return "⊙ " + truncate(String(x.thinking || ""), 40);
+        return x.type || "";
+      })
+      .filter(Boolean);
+    return truncate(bits.join(" · "), 100);
+  }
+  return truncate(JSON.stringify(content), 80);
 }
 
 function renderChainFromReply(text) {
