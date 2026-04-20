@@ -100,6 +100,9 @@ class OpenClawGatewayClient:
             "sessionKey": session_key,
             "message": message,
             "deliver": deliver,
+            # 让 Gateway 在没有外部 channel 配置时把投递降级成 session-only，
+            # 避免 "Channel is required (no configured channels detected)." 报错。
+            "bestEffortDeliver": True,
             "idempotencyKey": self._next_request_id(),
         }
 

@@ -653,6 +653,9 @@ async def _send_via_router(
             "sessionKey": session_key,
             "message": message,
             "deliver": True,
+            # 没配置外部 channel（Discord/Feishu/…）时，让 Gateway 把投递降级成 session-only，
+            # 否则会 INVALID_REQUEST: "Channel is required (no configured channels detected)."
+            "bestEffortDeliver": True,
             "idempotencyKey": idem_key,
         }
         await router.send_request(req_id, "agent", params)
