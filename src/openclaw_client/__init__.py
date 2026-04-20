@@ -1,3 +1,10 @@
+from .callback import (
+    CallbackHandler,
+    CallbackOutcome,
+    CallbackReturn,
+    CallbackStatus,
+    OpenClawCallbackPool,
+)
 from .client import OpenClawGatewayClient, OpenClawGatewayError
 from .pool import (
     OpenClawSessionPool,
@@ -8,6 +15,11 @@ from .pool import (
 )
 
 __all__ = [
+    "CallbackHandler",
+    "CallbackOutcome",
+    "CallbackReturn",
+    "CallbackStatus",
+    "OpenClawCallbackPool",
     "OpenClawGatewayClient",
     "OpenClawGatewayError",
     "OpenClawSessionPool",
