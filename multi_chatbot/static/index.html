@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpenClaw · 多用户多会话并发测试</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <div class="console" aria-label="OpenClaw Multi-Session Concurrency Console">
+    <!-- ======= TOP BAR ======= -->
+    <header class="top-bar">
+      <div class="brand">
+        <span class="logo-mark">◢◤</span>
+        <div class="brand-text">
+          <span class="brand-title">OPENCLAW · 多用户多会话并发测试</span>
+          <span class="brand-sub">MULTI-LANE CONCURRENCY HARNESS · v0.1</span>
+        </div>
+      </div>
+      <div class="top-gauges">
+        <div class="gauge">
+          <span class="gauge-label">CONCURRENCY</span>
+          <span class="gauge-value" id="gauge-concurrency">0 / 4</span>
+        </div>
+        <div class="gauge">
+          <span class="gauge-label">BLOCKED</span>
+          <span class="gauge-value" id="gauge-blocked">0</span>
+        </div>
+        <div class="gauge">
+          <span class="gauge-label">LINK</span>
+          <span class="gauge-value">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="status-label">DISCONNECTED</span>
+          </span>
+        </div>
+      </div>
+    </header>
+
+    <!-- ======= MAIN GRID ======= -->
+    <div class="grid">
+
+      <!-- ======= LEFT: Tree Editor ======= -->
+      <aside class="panel panel-left" aria-label="Multi-user tree editor">
+        <div class="panel-frame"></div>
+        <div class="panel-header">
+          <span class="panel-tag">L · PLAN EDITOR</span>
+          <span class="panel-accent" aria-hidden="true"></span>
+        </div>
+
+        <div class="editor-actions">
+          <button id="btn-add-user" class="btn btn-ghost" type="button">
+            <span class="ico-plus">＋</span>
+            添加用户
+          </button>
+          <div class="editor-save-state" id="editor-save-state">已保存</div>
+        </div>
+
+        <div id="tree" class="tree" aria-live="polite"></div>
+
+        <footer class="panel-footer">
+          <span class="tick" aria-hidden="true"></span>
+          <span>已持久化 · ~/.openclaw-cli/multi-chatbot-config.json</span>
+        </footer>
+      </aside>
+
+      <!-- ======= CENTER: Chat Grid ======= -->
+      <main class="panel panel-center" aria-label="Chat windows">
+        <div class="panel-frame"></div>
+
+        <div class="center-head">
+          <div class="center-title">
+            <span class="thread-mark" aria-hidden="true">◉</span>
+            <h2 id="center-title-text">尚未开始运行</h2>
+          </div>
+          <div class="center-meta">
+            <span class="chip" id="chip-lanes">0 lanes</span>
+            <span class="chip chip-done" id="chip-progress">0 / 0</span>
+          </div>
+        </div>
+
+        <div class="chat-grid" id="chat-grid">
+          <div class="chat-empty" id="chat-empty">
+            在左侧编辑用户 / 会话 / 预设提问，然后在右侧点击「开始」。<br />
+            每个 (用户, 会话) 将打开一个独立窗口，按顺序提问并实时接收回复。
+          </div>
+        </div>
+      </main>
+
+      <!-- ======= RIGHT: Stats + Control ======= -->
+      <aside class="panel panel-right" aria-label="Run status">
+        <div class="panel-frame"></div>
+        <div class="panel-header">
+          <span class="panel-tag">R · RUN STATUS</span>
+          <span class="panel-accent" aria-hidden="true"></span>
+        </div>
+
+        <section class="insp-card card-concurrency">
+          <header>
+            <span class="card-dot" style="--dot: var(--blue)"></span>
+            <span class="card-title">SCHEDULER · 并发负载</span>
+            <span class="card-state" id="scheduler-state">idle</span>
+          </header>
+          <div class="conc-bar" id="conc-bar">
+            <div class="conc-fill" id="conc-fill"></div>
+          </div>
+          <dl class="metrics">
+            <div><dt>CAPACITY</dt><dd id="metric-capacity">4</dd></div>
+            <div><dt>ACTIVE</dt><dd id="metric-active">0</dd></div>
+            <div><dt>QUEUED (BLOCKED)</dt><dd id="metric-queued">0</dd></div>
+            <div><dt>LANES TOTAL</dt><dd id="metric-lanes-total">0</dd></div>
+            <div><dt>LANES DONE</dt><dd id="metric-lanes-done">0</dd></div>
+          </dl>
+        </section>
+
+        <section class="insp-card card-run-ctl">
+          <header>
+            <span class="card-dot" style="--dot: var(--llm)"></span>
+            <span class="card-title">RUN CONTROL</span>
+          </header>
+          <div class="run-btn-row">
+            <button id="btn-start" class="btn btn-primary" type="button">▶ 开始</button>
+            <button id="btn-stop" class="btn btn-danger" type="button" disabled>■ 停止</button>
+          </div>
+          <p class="run-hint" id="run-hint">
+            把左侧树里每一条 (用户 → 会话) 作为一条车道，车道内部的预设提问
+            按顺序串行发送；不同车道之间共享 OpenClaw 并发 slot，竞争不过
+            的请求会进入阻塞队列。
+          </p>
+        </section>
+
+        <section class="insp-card card-lanes">
+          <header>
+            <span class="card-dot" style="--dot: var(--api)"></span>
+            <span class="card-title">LANES</span>
+            <span class="card-state" id="lanes-count">0</span>
+          </header>
+          <ul class="lane-list" id="lane-list"></ul>
+        </section>
+      </aside>
+    </div>
+
+    <!-- corner brackets (decorative) -->
+    <div class="corner corner-tl" aria-hidden="true"></div>
+    <div class="corner corner-tr" aria-hidden="true"></div>
+    <div class="corner corner-bl" aria-hidden="true"></div>
+    <div class="corner corner-br" aria-hidden="true"></div>
+  </div>
+
+  <!-- ==================== Templates ==================== -->
+
+  <template id="tpl-user-node">
+    <div class="tree-user">
+      <div class="tree-row tree-user-row">
+        <button class="tree-caret" type="button" aria-expanded="true">▾</button>
+        <span class="tree-ico">👤</span>
+        <input class="tree-name" type="text" placeholder="用户名" />
+        <button class="tree-add" type="button" title="添加会话">＋ 会话</button>
+        <button class="tree-del" type="button" title="删除用户">✕</button>
+      </div>
+      <div class="tree-children tree-sessions"></div>
+    </div>
+  </template>
+
+  <template id="tpl-session-node">
+    <div class="tree-session">
+      <div class="tree-row tree-session-row">
+        <button class="tree-caret" type="button" aria-expanded="true">▾</button>
+        <span class="tree-ico">⦿</span>
+        <input class="tree-name" type="text" placeholder="会话名" />
+        <button class="tree-add" type="button" title="添加提问">＋ 提问</button>
+        <button class="tree-del" type="button" title="删除会话">✕</button>
+      </div>
+      <div class="tree-children tree-questions"></div>
+    </div>
+  </template>
+
+  <template id="tpl-question-node">
+    <div class="tree-question">
+      <div class="tree-row tree-question-row">
+        <span class="tree-qdot">·</span>
+        <textarea class="tree-qtext" rows="1" placeholder="预设提问内容"></textarea>
+        <button class="tree-del" type="button" title="删除提问">✕</button>
+      </div>
+    </div>
+  </template>
+
+  <template id="tpl-chat-card">
+    <section class="chat-card" data-status="pending">
+      <header class="chat-head">
+        <div class="chat-title">
+          <span class="chat-dot"></span>
+          <span class="chat-user"></span>
+          <span class="chat-sep">/</span>
+          <span class="chat-session"></span>
+        </div>
+        <div class="chat-meta">
+          <span class="chat-status">pending</span>
+          <span class="chat-progress">0 / 0</span>
+        </div>
+      </header>
+      <ul class="chat-log"></ul>
+    </section>
+  </template>
+
+  <template id="tpl-chat-msg-user">
+    <li class="cm cm-user">
+      <div class="cm-role">USER</div>
+      <div class="cm-bubble"></div>
+    </li>
+  </template>
+
+  <template id="tpl-chat-msg-assistant">
+    <li class="cm cm-assistant">
+      <div class="cm-role">
+        <span class="cm-role-text">ASSISTANT</span>
+        <span class="cm-dur"></span>
+      </div>
+      <div class="cm-bubble"></div>
+    </li>
+  </template>
+
+  <template id="tpl-chat-msg-pending">
+    <li class="cm cm-pending">
+      <div class="cm-role">
+        <span class="cm-role-text">ASSISTANT</span>
+        <span class="cm-status"></span>
+      </div>
+      <div class="cm-bubble">等待 gateway 回复…</div>
+    </li>
+  </template>
+
+  <template id="tpl-chat-msg-error">
+    <li class="cm cm-error">
+      <div class="cm-role">ERROR</div>
+      <div class="cm-bubble"></div>
+    </li>
+  </template>
+
+  <template id="tpl-lane-item">
+    <li class="lane-item" data-status="pending">
+      <span class="lane-status-dot"></span>
+      <div class="lane-body">
+        <div class="lane-head">
+          <span class="lane-name"></span>
+          <span class="lane-progress"></span>
+        </div>
+        <div class="lane-sub">
+          <span class="lane-status-text"></span>
+        </div>
+      </div>
+    </li>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
